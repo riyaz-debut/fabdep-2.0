@@ -1,0 +1,86 @@
+- hosts: all
+  become: yes
+  gather_facts: false
+  module_defaults:
+    apt:
+      force_apt_get: yes
+  tasks:
+    - name: Transfer the preRequisite.sh script
+      copy: src=./scripts/preRequisite.sh dest=/home/{{ansible_user}} mode=0777
+
+    - name: Execute the preRequisite.sh script
+      command: sudo sh /home/{{ansible_user}}/preRequisite.sh
+
+# ---------------------------------------------------------------------------------------------------------------------
+
+    - name: Initialize the Cluster
+      shell: sudo kubeadm init --control-plane-endpoint={{ansible_host}} --apiserver-cert-extra-sans={{ansible_host}} --pod-network-cidr=10.244.0.0/16
+      args:
+        chdir: $HOME
+        creates: cluster_initialized.txt
+
+    - pause: seconds=10
+
+    - name: Create .kube directory
+      file:
+        path: /home/{{ansible_user}}/.kube
+        state: directory
+        mode: 0755
+
+    - name: Copy admin.conf to user's kube config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/{{ansible_user}}/.kube/config
+        remote_src: yes
+        owner: "{{ansible_user}}"
+
+    - name: Install Pod network
+      become_user: "{{ ansible_user }}"
+      shell: kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml >> pod_network_setup.txt
+      args:
+        chdir: $HOME
+        creates: pod_network_setup.txt
+
+    - name: Get join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+
+    - name: Install docker prerequisite
+      shell: sudo apt -y install docker.io
+      args:
+        chdir: $HOME
+
+- hosts: all
+  gather_facts: false
+  vars:
+    cluster_id: "{{ cluster_id }}"
+  tasks:
+    - name: Copy join command to local file
+      local_action:
+        module: file
+        state: directory
+        path: "~/.fabdep/join-command"
+        recurse: yes
+        mode: "u=rwx,g=rx,o=rx"
+
+    - name: Copy join command to local file
+      local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="~/.fabdep/join-command/{{ cluster_id }}"
+
+- hosts: all
+  become: yes
+  gather_facts: false
+  vars:
+    nfsexport: "/home/export"
+  tasks:
+    - name: Create mountable dir
+      file:
+        path: "{{nfsexport}}"
+        state: directory
+        mode: 755
+        owner: nobody
+        group: nogroup
+
+    - name: Fetch the .kube/config to local
+      fetch:
+        src: /home/{{ansible_user}}/.kube/config
+        dest: ~/
